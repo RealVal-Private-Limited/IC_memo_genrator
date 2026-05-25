@@ -18,7 +18,7 @@ except (KeyError, FileNotFoundError):
 # --- Inputs ---
 col1, col2 = st.columns(2)
 with col1:
-    uploaded_file = st.file_uploader("Upload Excel Financial Model (.xlsx)", type=["xlsx", "xls"])
+    uploaded_file = st.file_uploader("Upload Excel Financial Model", type=["xlsx", "xls", "xlsm"])
 with col2:
     observation_notes = st.text_area("Observation Notes", height=100)
     client_requirements = st.text_area("Client-Specific Requirements", height=100)
