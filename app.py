@@ -15,6 +15,19 @@ try:
 except (KeyError, FileNotFoundError):
     api_key = st.text_input("Enter your Anthropic API Key:", type="password")
 
+# --- Model Selection ---
+model_choice = st.selectbox(
+    "Model",
+    options=[
+        ("claude-sonnet-4-6", "Sonnet 4.6 — recommended for IC memos (best prose quality)"),
+        ("claude-haiku-4-5-20251001", "Haiku 4.5 — cheapest, fastest"),
+        ("claude-opus-4-7", "Opus 4.7 — highest quality, most expensive"),
+    ],
+    format_func=lambda x: x[1],
+    index=0,
+)
+selected_model = model_choice[0]
+
 # --- Inputs ---
 col1, col2 = st.columns(2)
 with col1:
@@ -25,68 +38,69 @@ with col2:
 
 def smart_excel_extractor(file):
     """
-    Searches for CRE keywords in the Excel file. 
+    Searches for CRE keywords in the Excel file.
     When found, it extracts the table downwards until it hits 3 consecutive blank rows.
     """
     xls = pd.ExcelFile(file)
     extracted_text = []
-    
+
     # Trigger keywords to look for in the model
     target_keywords = [
-        't-12', 'trailing 12', 't12', 'rent roll', 'unit mix', 
-        'proforma', 'pro forma', 'cash flow', 'return summary', 
+        't-12', 'trailing 12', 't12', 'rent roll', 'unit mix',
+        'proforma', 'pro forma', 'cash flow', 'return summary',
         'metrics', 'sources and uses'
     ]
-    
+
     for sheet_name in xls.sheet_names:
         # Read without headers so we can search every single cell
         df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-        
+
         skip_until = -1
-        
+
         for i, row in df.iterrows():
+            # Skip rows already claimed by a prior keyword match on this sheet
             if i < skip_until:
                 continue
-                
+
             # Convert the row to a single lowercase string to check for keywords
             row_str = ' '.join(row.dropna().astype(str).str.lower())
-            
+
             if any(keyword in row_str for keyword in target_keywords):
                 start_idx = i
                 end_idx = i
                 blank_count = 0
-                
+
                 # Scan downwards to find the end of the table
                 for j in range(i + 1, len(df)):
                     if df.iloc[j].dropna().empty:
                         blank_count += 1
                     else:
-                        blank_count = 0 
+                        blank_count = 0
                         end_idx = j
-                        
+
                     # Stop if we hit 3 consecutive blank rows
-                    if blank_count >= 3: 
+                    if blank_count >= 3:
                         break
-                
+
                 # Extract the chunk and drop entirely empty columns for cleaner reading
                 table_chunk = df.iloc[start_idx:end_idx + 1].dropna(how='all', axis=1)
-                
+
                 if not table_chunk.empty:
                     extracted_text.append(f"\n--- Found Data in Sheet: '{sheet_name}' ---")
-                    # Convert to string. We limit rows per table to 200 just in case it catches a massive raw data dump
+                    # Convert to string. Limit rows per table to 200 in case it catches a massive raw data dump
                     extracted_text.append(table_chunk.head(200).to_string(index=False, header=False))
-                
-                skip_until = end_idx + 1 
+
+                skip_until = end_idx + 1
 
     # Limit total output length so we don't exceed the LLM's token limit
     final_text = "\n".join(extracted_text)
-    return final_text[:50000] 
+    return final_text[:50000]
 
 def create_docx(text):
     """Creates a well-formatted Word document from Markdown text."""
     doc = Document()
     doc.add_heading('Investment Committee Memorandum', 0)
-    
+
     for line in text.split('\n'):
         if line.startswith('### '):
             doc.add_heading(line.replace('### ', '').strip(), level=3)
@@ -98,7 +112,7 @@ def create_docx(text):
             doc.add_paragraph(line[2:].strip(), style='List Bullet')
         elif line.strip():
             doc.add_paragraph(line.strip())
-            
+
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
@@ -113,49 +127,73 @@ if st.button("Generate IC Memo", type="primary"):
             try:
                 # 1. Smart Extraction
                 excel_data = smart_excel_extractor(uploaded_file)
-                
+
                 if not excel_data.strip():
                     st.warning("Could not automatically find standard tables (T-12, Rent Roll, etc.). The LLM will do its best with limited data.")
-                
+
                 # 2. Call Claude API
                 client = anthropic.Anthropic(api_key=api_key)
-                
-                system_prompt = "You are an expert Commercial Real Estate Underwriter drafting an IC Memo."
-                
-                user_message = f"""
-                Draft a professional IC Memo. 
-                
-                Structure:
-                1. Executive Summary
-                2. Deal Summary & Headline Metrics
-                3. Going-In Cap Rate Analysis
-                4. Key Investment Highlights
-                5. Unit Mix & Underwriting Assumptions
-                
-                Client Requirements: {client_requirements}
-                Observation Notes: {observation_notes}
-                
-                Extracted Excel Data:
-                {excel_data}
-                
-                Format using Markdown headers (#, ##) and bullet points.
-                """
-                
+
+                system_prompt = (
+                    "You are an experienced Commercial Real Estate underwriting analyst drafting "
+                    "an Investment Committee memo. Write in a direct, evidence-driven, neutral "
+                    "tone. Cite specific numbers from the extracted data. Do not include "
+                    "recommendation language like 'we recommend proceeding' — those are "
+                    "firm-level decisions, not the analyst's to assert."
+                )
+
+                user_message = f"""Draft a professional IC Memo.
+
+Structure:
+1. Executive Summary
+2. Deal Summary & Headline Metrics
+3. Going-In Cap Rate Analysis (include both the standard going-in cap and a T&I adjusted going-in cap if data permits)
+4. Key Investment Highlights
+5. Unit Mix & Underwriting Assumptions
+6. Forward-Looking Proforma (T-12 + 5-year)
+7. Real Estate Tax Analysis (year-by-year)
+8. Key Risks and Mitigants
+9. Open Diligence Items
+
+Client Requirements:
+{client_requirements}
+
+Observation Notes:
+{observation_notes}
+
+Extracted Excel Data:
+{excel_data}
+
+Format using Markdown headers (#, ##, ###) and bullet points where appropriate.
+"""
+
                 response = client.messages.create(
-                    model="claude-3-haiku-20240307",
-                    max_tokens=4000,
+                    model=selected_model,
+                    max_tokens=8000,
                     system=system_prompt,
                     messages=[{"role": "user", "content": user_message}]
                 )
-                
+
                 memo_content = response.content[0].text
-                
+
+                # Show usage / cost info
+                usage = response.usage
+                st.info(
+                    f"Tokens — input: {usage.input_tokens:,} | output: {usage.output_tokens:,} | "
+                    f"model: {selected_model}"
+                )
+
                 st.divider()
                 st.subheader("Generated IC Memo")
                 st.markdown(memo_content)
-                
+
                 doc_buffer = create_docx(memo_content)
-                st.download_button("📄 Download as Word Document", data=doc_buffer, file_name="IC_Memo.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-                
+                st.download_button(
+                    "📄 Download as Word Document",
+                    data=doc_buffer,
+                    file_name="IC_Memo.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+
             except Exception as e:
                 st.error(f"Error: {e}")
